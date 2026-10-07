@@ -1,7 +1,7 @@
 const axios = require('axios')
 const { sha256Encrypt, JwtDecode, jitter } = require('./tools')
 const { logger } = require('./logger')
-const { getProxyAgent, getChatBaseUrl, applyProxyToAxiosConfig } = require('./proxy-helper')
+const { applyProxyToAxiosConfig, getChatBaseUrl } = require('./proxy-helper');
 const { buildUserAgent } = require('./header-profile')
 
 /**
@@ -33,7 +33,6 @@ class TokenManager {
      */
     async login(email, password, account) {
         try {
-            const proxyAgent = getProxyAgent(account)
             // Use per-account fingerprint UA when available; fall back to legacy Edge UA
             const ua = (account && account.fingerprint) ? buildUserAgent(account.fingerprint) : this.defaultHeaders['User-Agent']
             const requestConfig = {
@@ -41,11 +40,7 @@ class TokenManager {
                 timeout: 10000 // 10秒超时
             }
 
-            // 添加代理配置
-            if (proxyAgent) {
-                requestConfig.httpsAgent = proxyAgent
-                requestConfig.proxy = false
-            }
+            applyProxyToAxiosConfig(requestConfig, account);
 
             const response = await axios.post(this.loginEndpoint, {
                 email: email,
@@ -53,7 +48,8 @@ class TokenManager {
             }, requestConfig)
 
             if (response.data && response.data.token) {
-                logger.success(`${email} 登录成功：${response.data.token}`, 'AUTH')
+                // 不记录令牌本身：日志可能落盘或被采集，令牌可直接冒充该账户
+                logger.success(`${email} 登录成功`, 'AUTH')
                 return response.data.token
             } else {
                 logger.error(`${email} 登录响应缺少令牌`, 'AUTH')

@@ -576,7 +576,7 @@ const editProxy = ref({ email: '', proxy: '' })
 const isSavingProxy = ref(false)
 
 // 与后端 src/utils/proxy-helper.js#PROXY_URL_REGEX 保持一致
-const PROXY_URL_REGEX = /^(https?|socks5):\/\/[^\s]+$/i
+const PROXY_URL_REGEX = /^(https?|socks5h?):\/\/[^\s]+$/i
 const isValidProxy = (value) => {
   if (!value) return true
   const trimmed = String(value).trim()
@@ -606,6 +606,8 @@ const selectAll = ref(false)
 const showDeleteAllConfirm = ref(false)
 
 // 刷新相关
+// 一键刷新只处理临期令牌；阈值同时用于请求和提示文案，避免两处不一致
+const REFRESH_THRESHOLD_HOURS = 24
 const isRefreshingAll = ref(false)
 const isForceRefreshingAll = ref(false)
 const refreshingTokens = ref([])
@@ -1153,19 +1155,28 @@ const refreshToken = async (email) => {
 const refreshAllAccounts = async () => {
   if (isRefreshingAll.value) return
 
-  if (!confirm(t('msg.refreshAllConfirm'))) return
+  if (!confirm(t('msg.refreshAllConfirm', { hours: REFRESH_THRESHOLD_HOURS }))) return
 
   isRefreshingAll.value = true
 
   try {
     const response = await axios.post('/api/refreshAllAccounts', {
-      thresholdHours: 24
+      thresholdHours: REFRESH_THRESHOLD_HOURS
     }, {
       headers: getAuthHeaders()
     })
 
     await getTokens()
-    showToast(t('msg.refreshAllComplete', { n: response.data.refreshedCount }))
+    const { refreshedCount, expiringCount } = response.data
+    // 令牌有效期远长于阈值，多数时候没有临期账户；直接报「刷新了 0 个」会被当成按钮失效（#113）
+    if (expiringCount === 0) {
+      showToast(t('msg.refreshAllNone', { hours: REFRESH_THRESHOLD_HOURS }), 'warning')
+    } else {
+      showToast(
+        t('msg.refreshAllComplete', { n: refreshedCount, total: expiringCount }),
+        refreshedCount < expiringCount ? 'warning' : 'success'
+      )
+    }
   } catch (error) {
     console.error('refreshAllAccounts error:', error)
     showToast(t('msg.refreshAllFailed') + error.message, 'error')
@@ -1452,14 +1463,16 @@ onBeforeUnmount(() => {
   position: absolute;
   top: 0;
   left: 0;
-  width: 0;
+  width: 100%;
   height: 100%;
   background: rgba(99, 102, 241, 0.1);
-  transition: width 0.3s ease;
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.3s ease;
 }
 
 .custom-checkbox:hover .checkbox-icon:before {
-  width: 100%;
+  transform: scaleX(1);
 }
 
 .custom-checkbox input:checked + .checkbox-icon svg {

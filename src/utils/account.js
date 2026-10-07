@@ -339,10 +339,9 @@ class Account {
      * saveAllAccounts batch (instead of 30 individual saves).
      *
      * Caveats:
-     * - PM2_INSTANCES > 1: each worker archives its own partial copy of stats;
-     *   the daily total would be under-reported proportionally to the worker
-     *   count. With instances=1 (ecosystem.config.js default) this is not
-     *   triggered.
+     * - Multiple replicas archive independent in-memory stats. They need
+     *   coordinated aggregation before sharing persistence; one process is
+     *   the supported default.
      * - DATA_SAVE_MODE=none: saveAllAccounts returns false and history is not
      *   persisted. Set DATA_SAVE_MODE=file or redis to enable the feature.
      * @private
@@ -466,6 +465,17 @@ class Account {
 
 
     /**
+     * 令牌将在阈值内过期（或已失效）的账户
+     * @param {number} thresholdHours - 过期阈值（小时）
+     * @returns {Array} 需要刷新的账户
+     */
+    getAccountsNeedingRefresh(thresholdHours = 24) {
+        return this.accountTokens.filter(account =>
+            this.tokenManager.isTokenExpiringSoon(account.token, thresholdHours)
+        )
+    }
+
+    /**
      * 自动刷新即将过期的令牌
      * @param {number} thresholdHours - 过期阈值（小时）
      * @returns {Promise<number>} 成功刷新的令牌数量
@@ -479,9 +489,7 @@ class Account {
         logger.info('开始自动刷新令牌...', 'TOKEN', '🔄')
 
         // 获取需要刷新的账户
-        const needsRefresh = this.accountTokens.filter(account =>
-            this.tokenManager.isTokenExpiringSoon(account.token, thresholdHours)
-        )
+        const needsRefresh = this.getAccountsNeedingRefresh(thresholdHours)
 
         if (needsRefresh.length === 0) {
             logger.info('没有需要刷新的令牌', 'TOKEN')
@@ -544,7 +552,7 @@ class Account {
      * 获取下一个可用的账户对象（包含 proxy 等完整字段）
      * @returns {Object|null} 账户对象或 null
      */
-    getAccount() {
+    getAccount(excludedEmails = []) {
         if (!this.isInitialized) {
             logger.warn('账户管理器尚未初始化完成', 'ACCOUNT')
             return null
@@ -555,7 +563,7 @@ class Account {
             return null
         }
 
-        const account = this.accountRotator.getNextAccount()
+        const account = this.accountRotator.getNextAccount(excludedEmails)
         if (!account) {
             logger.error('所有账户令牌都不可用', 'ACCOUNT')
         }
@@ -657,18 +665,6 @@ class Account {
         return false
     }
 
-    // 更新销毁方法，清除定时器
-    destroy() {
-        if (this.saveInterval) {
-            clearInterval(this.saveInterval)
-        }
-        if (this.refreshInterval) {
-            clearInterval(this.refreshInterval)
-        }
-    }
-
-
-
     /**
      * 生成 Markdown 表格
      * @param {Array} websites - 网站信息数组
@@ -765,9 +761,20 @@ class Account {
     }
 
     /**
+     * 记录“该账户今天的额度已耗尽”，把它移出轮询直到额度恢复。
+     * 调用方：anthropic.js / chat.js 的 catch，经 upstream-error#noteRateLimitedAccount。
+     * 额度耗尽藏在 HTTP 200 的 SSE 包体里，request.js 的状态码分支永远看不到它。
+     * @param {string} email - 邮箱地址
+     * @param {number|null} [retryAfterSeconds] - 上游给的真实等待（秒）
+     */
+    recordAccountQuotaExhausted(email, retryAfterSeconds = null) {
+        this.accountRotator.recordQuotaExhausted(email, retryAfterSeconds)
+    }
+
+    /**
      * 累计 daily stats（per-account）
      * 调用方：chat.js / anthropic.js / cli.chat.js 在成功消费完上游 usage 后
-     * 注意：PM2_INSTANCES>1 时各 worker 各持一份 in-memory 副本（已记于 epic notes）
+     * 注意：多个副本各持一份 in-memory 统计，不会自动聚合。
      * @param {string} email - 邮箱地址
      * @param {'chat'|'cli'} kind - 统计类别
      * @param {Object} delta - 增量
